@@ -8,13 +8,14 @@ Created on Thu Aug 13 18:20:59 2020
 
 import tensorflow as tf
 from tensorflow.keras import Model
-from tensoflow.keras.layers import (
+from tensorflow.keras.layers import (
     Input,
     Concatenate,
     UpSampling2D,
    )
 
 from .backbone import Darknet, DarknetConv
+from .utils import ANCHORS, STRIDES
 
 
 def YoloConv(filters, name=None):
@@ -39,22 +40,73 @@ def YoloConv(filters, name=None):
     return yolo_conv
 
 
-def YoloV3(size=None, classes=80):
-    x = Input([size, size, 3], name='input')
+class YoloOutput(tf.keras.layers.Layer):
+
+    def __init__(self, classes=80, masks=None, strides=None):
+        super(YoloOutput, self).__init__()
+        self.classes = classes
+        self.masks = masks
+        self.strides = strides
+
+    def __call__(self, x):
+
+        batch_size, output_size = tf.shape(x)[:2]
+        x_output = tf.reshape(x, (-1, output_size, output_size,
+                                  3, 5 + self.classes))
+
+        x_dxdy = x_output[:, :, :, :, 0:2]
+        x_dwdh = x_output[:, :, :, :, 2:4]
+        x_conf = x_output[:, :, :, :, 4:5]
+        x_prob = x_output[:, :, :, :, 5:]
+
+        # Draw the grid
+
+        y = tf.range(output_size, dtype=tf.int32)
+        y = tf.expand_dims(y, axis=-1)
+        y = tf.tile(y, [1, output_size])
+        x = tf.range(output_size, dtype=tf.int32)
+        x = tf.expand_dims(x, axis=0)
+        x = tf.tile(x, [output_size, 1])
+
+        xy_grid = tf.concat([x[:, :, tf.newaxis], y[:, :, tf.newaxis]],
+                            axis=-1)
+        xy_grid = tf.tile(xy_grid[tf.newaxis, :, :, tf.newaxis, :],
+                          [batch_size, 1, 1, 3, 1])
+        xy_grid = tf.cast(xy_grid, tf.float32)
+
+        pred_xy = (tf.sigmoid(x_dxdy) + xy_grid) * self.strides
+        pred_wh = tf.exp(x_dwdh) * self.masks * self.strides
+
+        pred_xywh = tf.concat([pred_xy, pred_wh], axis=-1)
+        pred_conf = tf.sigmoid(x_conf)
+        pred_prob = tf.sigmoid(x_prob)
+
+        return tf.concat([pred_xywh, pred_conf, pred_prob], axis=-1)
+
+
+def YoloV3(size=None, classes=80, training=False):
+    x = inputs = Input([size, size, 3], name='input')
 
     x_36, x_61, x = Darknet(name='yolo_darknet')(x)
 
     x = YoloConv(512, name='yolo_conv_0')(x)
-    l_output = DarknetConv(x, filters=3*(classes + 5), size=1,
-                           activate=False, bn=False)
+    l_output = DarknetConv(x, filters=3*(classes + 5),
+                           size=1, activate=False, bn=False)
 
     x = YoloConv(256, name='yolo_conv_1')((x, x_61))
-    m_output = DarknetConv(x, filters=3*(classes + 5), size=1,
-                           activate=False, bn=False)
+    m_output = DarknetConv(x, filters=3*(classes + 5),
+                           size=1, activate=False, bn=False)
 
     x = YoloConv(128, name='yolo_conv_2')((x, x_36))
-    s_output = DarknetConv(x, filters=3*(classes + 5), size=1,
-                           activate=False, bn=False)
+    s_output = DarknetConv(x, filters=3*(classes + 5),
+                           size=1, activate=False, bn=False)
 
-    return [l_output, m_output, s_output]
+    output_tensors = []
+    for i, output_tensor in enumerate([s_output, m_output, l_output]):
+        pred_tensor = YoloOutput(classes, masks=ANCHORS[i],
+                                 strides=STRIDES[i])(output_tensor)
+        if training:
+            output_tensors.append(output_tensor)
+        output_tensors.append(pred_tensor)
 
+    return Model(inputs, output_tensors)
