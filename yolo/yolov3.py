@@ -40,19 +40,12 @@ def YoloConv(filters, name=None):
     return yolo_conv
 
 
-class YoloOutput(tf.keras.layers.Layer):
-
-    def __init__(self, classes=80, masks=None, strides=None):
-        super(YoloOutput, self).__init__()
-        self.classes = classes
-        self.masks = masks
-        self.strides = strides
-
-    def __call__(self, x):
+def YoloOutput(classes=80, masks=None, strides=None):
+    def yolo_output(x):
 
         batch_size, output_size = tf.shape(x)[:2]
         x_output = tf.reshape(x, (-1, output_size, output_size,
-                                  3, 5 + self.classes))
+                                  3, 5 + classes))
 
         x_dxdy = x_output[:, :, :, :, 0:2]
         x_dwdh = x_output[:, :, :, :, 2:4]
@@ -74,14 +67,15 @@ class YoloOutput(tf.keras.layers.Layer):
                           [batch_size, 1, 1, 3, 1])
         xy_grid = tf.cast(xy_grid, tf.float32)
 
-        pred_xy = (tf.sigmoid(x_dxdy) + xy_grid) * self.strides
-        pred_wh = tf.exp(x_dwdh) * self.masks * self.strides
+        pred_xy = (tf.sigmoid(x_dxdy) + xy_grid) * strides
+        pred_wh = tf.exp(x_dwdh) * masks * strides
 
         pred_xywh = tf.concat([pred_xy, pred_wh], axis=-1)
         pred_conf = tf.sigmoid(x_conf)
         pred_prob = tf.sigmoid(x_prob)
 
         return tf.concat([pred_xywh, pred_conf, pred_prob], axis=-1)
+    return yolo_output
 
 
 def YoloV3(size=None, classes=80, training=False):
